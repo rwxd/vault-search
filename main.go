@@ -3,15 +3,28 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
 )
 
+var (
+	flagVerbose    = flag.Bool("v", false, "Verbose mode")
+	flagMountpoint = flag.String("m", "secret", "Mountpoint to search for secrets")
+)
+
 func main() {
 	flag.Parse()
-	mountPath := flag.Arg(0)
+	search := flag.Arg(0)
+
+	logLevel := slog.LevelWarn
+	if *flagVerbose {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
 
 	vaultAddr := os.Getenv("VAULT_ADDR")
 	vaultToken := os.Getenv("VAULT_TOKEN")
@@ -43,7 +56,7 @@ func main() {
 	client.SetToken(vaultToken)
 
 	// Start recursive search
-	searchSecrets(client, mountPath)
+	searchSecrets(client, *flagMountpoint+"/", search)
 }
 
 // Try reading from the ~/.vault-token file if not provided as environment variables
@@ -69,7 +82,7 @@ func readTokenFromFile() (string, error) {
 	return string(tokenBytes[:n]), nil
 }
 
-func searchSecrets(client *vault.Client, mount string) {
+func searchSecrets(client *vault.Client, mount string, search string) {
 	secrets, err := listSecretsRecursively(client, mount, "")
 	if err != nil {
 		fmt.Println("Error listing secrets:", err)
@@ -78,51 +91,43 @@ func searchSecrets(client *vault.Client, mount string) {
 
 	fmt.Println("Found the following secrets:")
 	for _, secret := range secrets {
-		fmt.Println(secret)
+		name := secret.Data["path"].(string)
+		if search == "" || strings.Contains(strings.ToLower(name), strings.ToLower(search)) {
+			fmt.Println(mount + name)
+		}
 	}
 }
 
 func listSecretsRecursively(client *vault.Client, mount string, path string) ([]*vault.Secret, error) {
 	found := []*vault.Secret{}
 
-	fmt.Println("Listing secrets at", mount+path)
+	slog.Debug("Listing secrets", "path", mount+path)
 	keys, err := client.Logical().List(mount + "metadata/" + path)
 	if err != nil {
 		return found, err
 	}
 
 	if keys == nil {
-		fmt.Println("No secrets found at", mount+path)
+		slog.Debug("No secrets found", "path", mount+path)
 		return found, nil
 	}
 
 	for _, item := range keys.Data["keys"].([]interface{}) {
-		if isVaultDir(path + item.(string)) {
-			fmt.Println("Found a directory:", item)
-			secrets, err := listSecretsRecursively(client, mount, path+item.(string))
+		itemPath := path + item.(string)
+		if isVaultDir(itemPath) {
+			slog.Debug("Found a directory", "item", item)
+			secrets, err := listSecretsRecursively(client, mount, itemPath)
 			if err != nil {
 				return found, err
 			}
-
-			for _, secret := range secrets {
-				if isVaultSecret(secret.Data["path"].(string)) {
-					found = append(found, secret)
-				} else {
-					newFound, err := listSecretsRecursively(client, mount, secret.Data["path"].(string))
-					if err != nil {
-						return found, err
-					}
-
-					found = append(found, newFound...)
-				}
-			}
+			found = append(found, secrets...)
 		} else {
-			fmt.Println("Found a secret:", item)
+			slog.Debug("Found a secret", "item", item)
 			found = append(found, &vault.Secret{Data: map[string]interface{}{"path": path + item.(string)}})
 		}
 	}
 
-	fmt.Println("Found", len(found), "secrets at", mount+path)
+	slog.Debug("Found secrets", "number", len(found), "path", mount+path)
 	return found, nil
 }
 
