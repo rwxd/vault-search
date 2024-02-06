@@ -1,6 +1,6 @@
 module github.com/rwxd/vault-search
 
-go 1.21.6
+go 1.22.0
 
 require (
 	github.com/cenkalti/backoff/v3 v3.0.0 // indirect
